@@ -51,6 +51,8 @@ static gpointer net_conn_new(ConnectionStorage *conn, gpointer user_data);
 static void net_conn_data(ConnectionStorage *conn, gpointer buffer, gsize length, gpointer conn_user_data);
 static void net_conn_close(gpointer conn_user_data);
 
+static void net_send_frame(ProxyConn *pc, struct can_frame *frame);
+
 static void can_new_frame(CanSource *can_src, struct can_frame *frame, gpointer user_data);
 
 int main(int argc, char *argv[]) {
@@ -156,5 +158,46 @@ static void net_conn_close(gpointer conn_user_data) {
     g_free(pc);
 }
 
+static void net_send_frame(ProxyConn *pc, struct can_frame *frame) {
+    gchar buf[256];
+    gsize pos=0;
+    gint i;
+    gchar tohex[16] = {
+        '0','1','2','3',
+        '4','5','6','7',
+        '8','9','a','b',
+        'c','d','e','f'
+    };
+
+    buf[pos++] = 'P';
+    buf[pos++] = 'K';
+    buf[pos++] = 'T';
+    buf[pos++] = ' ';
+    buf[pos++] = tohex[(frame->can_id>>(4*7))&0x1];
+    buf[pos++] = tohex[(frame->can_id>>(4*6))&0xF];
+    buf[pos++] = tohex[(frame->can_id>>(4*5))&0xF];
+    buf[pos++] = tohex[(frame->can_id>>(4*4))&0xF];
+    buf[pos++] = tohex[(frame->can_id>>(4*3))&0xF];
+    buf[pos++] = tohex[(frame->can_id>>(4*2))&0xF];
+    buf[pos++] = tohex[(frame->can_id>>(4*1))&0xF];
+    buf[pos++] = tohex[(frame->can_id>>(4*0))&0xF];
+    buf[pos++] = ' ';
+    buf[pos++] = (frame->can_id&CAN_EFF_FLAG) ? '1' : '0';
+    buf[pos++] = ' ';
+    buf[pos++] = (frame->can_id&CAN_RTR_FLAG) ? '1' : '0';
+    for(i=0;i<frame->can_dlc;i++) {
+        buf[pos++] = ' ';
+        buf[pos++] = tohex[(frame->data[i]>>4)&0xF];
+        buf[pos++] = tohex[(frame->data[i]>>0)&0xF];
+    }
+    buf[pos++] = '\n';
+    connection_send(pc->conn, buf, pos);
+}
+
 static void can_new_frame(CanSource *can_src, struct can_frame *frame, gpointer user_data) {
+    ProxyConnStore *pcs = (ProxyConnStore *)user_data;
+    gint i;
+    for(i=0;i<pcs->connections->len;i++) {
+        net_send_frame(pcs->connections->pdata[i], frame);
+    }
 }
