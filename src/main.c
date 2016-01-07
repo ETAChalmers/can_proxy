@@ -12,11 +12,23 @@
 #include "client_gsource.h"
 #include "server_gsource.h"
 
+/* Maximum line length, longer lines will be truncated */
+#define LINEBUF_SIZE 256
+
 static gboolean stop_mainloop(gpointer data);
 
 typedef struct ProxyConnStore_ {
     CanSource *can_src;
+    GPtrArray *connections;
 } ProxyConnStore;
+
+typedef struct ProxyConn_ {
+    ProxyConnStore *pcs;
+    ConnectionStorage *conn;
+
+    gint bufpos;
+    gchar buf[LINEBUF_SIZE];
+} ProxyConn;
 
 /*
  * Command line options
@@ -53,6 +65,7 @@ int main(int argc, char *argv[]) {
 	GOptionContext *optctx;
 
     memset(&stor, 0, sizeof(ProxyConnStore));
+    stor.connections = g_ptr_array_new(); /* FIXME: should disconnect remaining connecitons */
 
 	optctx = g_option_context_new("- CanSocket / Auml-CAN proxy");
 	g_option_context_add_main_entries(optctx, opt_entries, NULL);
@@ -90,6 +103,8 @@ cleanup:
     server_source_destroy(srv_src);
     client_source_destroy(cli_src);
 
+    g_ptr_array_unref(stor.connections);
+
 	g_option_context_free(optctx);
 	g_main_loop_unref(ml);
 
@@ -103,14 +118,42 @@ static gboolean stop_mainloop(gpointer data) {
 }
 
 static gpointer net_conn_new(ConnectionStorage *conn, gpointer user_data) {
+    ProxyConn *pc = g_malloc0(sizeof(ProxyConn));
+
+    pc->pcs = (ProxyConnStore*) user_data;
+    pc->conn = conn;
+    pc->bufpos = 0;
+
+    g_ptr_array_add(pc->pcs->connections, pc);
     g_message("Got connection");
-    return user_data;
+    return pc;
 }
 static void net_conn_data(ConnectionStorage *conn, gpointer buffer, gsize length, gpointer conn_user_data) {
-    g_message("Got data");
+    ProxyConn *pc = (ProxyConn *)conn_user_data;
+    gchar *strbuf = buffer;
+    gint i;
+    for(i=0;i<length;i++) {
+        if(strbuf[i] == '\n') {
+            /* New line */
+            pc->buf[pc->bufpos] = '\0';
+
+            g_message("Got line: %s", pc->buf);
+            pc->bufpos = 0;
+        } else {
+            /* always keep space for \0 */
+            if(pc->bufpos < LINEBUF_SIZE-1) {
+                pc->buf[pc->bufpos++] = strbuf[i];
+            }
+        }
+    }
 }
 static void net_conn_close(gpointer conn_user_data) {
+    ProxyConn *pc = (ProxyConn *)conn_user_data;
     g_message("Lost connection");
+
+    g_ptr_array_remove_fast(pc->pcs->connections, pc);
+
+    g_free(pc);
 }
 
 static void can_new_frame(CanSource *can_src, struct can_frame *frame, gpointer user_data) {
