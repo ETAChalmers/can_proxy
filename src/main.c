@@ -51,6 +51,7 @@ static gpointer net_conn_new(ConnectionStorage *conn, gpointer user_data);
 static void net_conn_data(ConnectionStorage *conn, gpointer buffer, gsize length, gpointer conn_user_data);
 static void net_conn_close(gpointer conn_user_data);
 
+static void net_new_line(ProxyConn *pc, const gchar *line);
 static void net_send_frame(ProxyConn *pc, struct can_frame *frame);
 
 static void can_new_frame(CanSource *can_src, struct can_frame *frame, gpointer user_data);
@@ -127,7 +128,6 @@ static gpointer net_conn_new(ConnectionStorage *conn, gpointer user_data) {
     pc->bufpos = 0;
 
     g_ptr_array_add(pc->pcs->connections, pc);
-    g_message("Got connection");
     return pc;
 }
 static void net_conn_data(ConnectionStorage *conn, gpointer buffer, gsize length, gpointer conn_user_data) {
@@ -138,9 +138,9 @@ static void net_conn_data(ConnectionStorage *conn, gpointer buffer, gsize length
         if(strbuf[i] == '\n') {
             /* New line */
             pc->buf[pc->bufpos] = '\0';
-
-            g_message("Got line: %s", pc->buf);
             pc->bufpos = 0;
+
+            net_new_line(pc, pc->buf);
         } else {
             /* always keep space for \0 */
             if(pc->bufpos < LINEBUF_SIZE-1) {
@@ -151,11 +151,61 @@ static void net_conn_data(ConnectionStorage *conn, gpointer buffer, gsize length
 }
 static void net_conn_close(gpointer conn_user_data) {
     ProxyConn *pc = (ProxyConn *)conn_user_data;
-    g_message("Lost connection");
 
     g_ptr_array_remove_fast(pc->pcs->connections, pc);
 
     g_free(pc);
+}
+
+static void net_new_line(ProxyConn *pc, const gchar *line) {
+    gchar **parts = g_strsplit_set(line, " ", 0);
+    struct can_frame frame;
+    gint i;
+
+    memset(&frame, 0, sizeof(struct can_frame));
+
+    /* If no PKT line, ignore */
+    if(parts[0] == NULL || strcmp("PKT", parts[0]) != 0)
+        goto cleanup;
+
+    /* Parse ID */
+    if(parts[1] == NULL)
+        goto cleanup;
+    frame.can_id = g_ascii_strtoll(parts[1], NULL, 16) & CAN_EFF_MASK;
+
+    /* Parse extended flag */
+    if(parts[2] == NULL || (strcmp(parts[2], "0") != 0 && strcmp(parts[2], "1") != 0))
+        goto cleanup;
+    if(parts[2][0] == '1')
+        frame.can_id |= CAN_EFF_FLAG;
+    else
+        frame.can_id &= CAN_SFF_MASK; /* truncate id if no eff */
+
+    /* Parse remote request flag */
+    if(parts[3] == NULL || (strcmp(parts[3], "0") != 0 && strcmp(parts[3], "1") != 0))
+        goto cleanup;
+    if(parts[3][0] == '1')
+        frame.can_id |= CAN_RTR_FLAG;
+
+    /* Parse data fields */
+    for(i=0;parts[4+i] != NULL && i<8;i++) {
+        frame.data[i] = g_ascii_strtoll(parts[4+i], NULL, 16);
+    }
+    frame.can_dlc = i;
+
+    /* Successful parse, send frame */
+    for(i=0;i<pc->pcs->connections->len;i++) {
+        /* Don't echo back */
+        if(pc->pcs->connections->pdata[i] == pc)
+            continue;
+        net_send_frame(pc->pcs->connections->pdata[i], &frame);
+    }
+
+    /* also send to SocketCan */
+    cansource_send(pc->pcs->can_src, &frame);
+
+cleanup:
+    g_strfreev(parts);
 }
 
 static void net_send_frame(ProxyConn *pc, struct can_frame *frame) {
