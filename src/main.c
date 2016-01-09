@@ -20,6 +20,9 @@ static gboolean stop_mainloop(gpointer data);
 typedef struct ProxyConnStore_ {
     CanSource *can_src;
     GPtrArray *connections;
+
+    gboolean exit_after_last_connection;
+    GMainLoop *ml;
 } ProxyConnStore;
 
 typedef struct ProxyConn_ {
@@ -57,18 +60,17 @@ static void net_send_frame(ProxyConn *pc, struct can_frame *frame);
 static void can_new_frame(CanSource *can_src, struct can_frame *frame, gpointer user_data);
 
 int main(int argc, char *argv[]) {
-	GMainLoop *ml = NULL;
-	GError *error = NULL;
+    ProxyConnStore pcs;
 
-    ProxyConnStore stor;
+	GError *error = NULL;
 
     ClientSource *cli_src = NULL;
     ServerSource *srv_src = NULL;
 
 	GOptionContext *optctx;
 
-    memset(&stor, 0, sizeof(ProxyConnStore));
-    stor.connections = g_ptr_array_new(); /* FIXME: should disconnect remaining connecitons */
+    memset(&pcs, 0, sizeof(ProxyConnStore));
+    pcs.connections = g_ptr_array_new(); /* FIXME: should disconnect remaining connecitons */
 
 	optctx = g_option_context_new("- CanSocket / Auml-CAN proxy");
 	g_option_context_add_main_entries(optctx, opt_entries, NULL);
@@ -77,39 +79,41 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 
-	ml = g_main_loop_new(NULL, TRUE);
+	pcs.ml = g_main_loop_new(NULL, TRUE);
 
 	/* Do a nice shutdown if interrupted */
-	g_unix_signal_add(SIGHUP, stop_mainloop, ml);
-	g_unix_signal_add(SIGINT, stop_mainloop, ml);
-	g_unix_signal_add(SIGTERM, stop_mainloop, ml);
+	g_unix_signal_add(SIGHUP, stop_mainloop, pcs.ml);
+	g_unix_signal_add(SIGINT, stop_mainloop, pcs.ml);
+	g_unix_signal_add(SIGTERM, stop_mainloop, pcs.ml);
 
-	stor.can_src = cansource_new(opt_can_if, can_new_frame, &stor);
+	pcs.can_src = cansource_new(opt_can_if, can_new_frame, &pcs);
 
     if(opt_listen) {
-        srv_src = server_source_new(opt_addr, opt_port, net_conn_new, net_conn_data, net_conn_close, &stor);
+        pcs.exit_after_last_connection = FALSE;
+        srv_src = server_source_new(opt_addr, opt_port, net_conn_new, net_conn_data, net_conn_close, &pcs);
         if (srv_src == NULL) {
             g_warning("Can't bind to port");
             goto cleanup;
         }
     } else {
-        cli_src = client_source_new(opt_addr, opt_port, net_conn_new, net_conn_data, net_conn_close, &stor);
+        pcs.exit_after_last_connection = TRUE;
+        cli_src = client_source_new(opt_addr, opt_port, net_conn_new, net_conn_data, net_conn_close, &pcs);
         if (cli_src == NULL) {
             g_warning("Can't connect to client");
             goto cleanup;
         }
     }
 
-	g_main_loop_run(ml);
+	g_main_loop_run(pcs.ml);
 
 cleanup:
     server_source_destroy(srv_src);
     client_source_destroy(cli_src);
 
-    g_ptr_array_unref(stor.connections);
+    g_ptr_array_unref(pcs.connections);
 
 	g_option_context_free(optctx);
-	g_main_loop_unref(ml);
+	g_main_loop_unref(pcs.ml);
 
 	return 0;
 }
@@ -153,6 +157,10 @@ static void net_conn_close(gpointer conn_user_data) {
     ProxyConn *pc = (ProxyConn *)conn_user_data;
 
     g_ptr_array_remove_fast(pc->pcs->connections, pc);
+
+    if(pc->pcs->exit_after_last_connection) {
+        stop_mainloop(pc->pcs->ml);
+    }
 
     g_free(pc);
 }
